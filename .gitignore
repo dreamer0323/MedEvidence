@@ -1,0 +1,22 @@
+# 密钥：绝对不许提交
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# 数据与向量库（体积大，第 2 周会用到）
+data/
+*.sqlite3
+chroma/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
