@@ -20,3 +20,8 @@ chroma/
 .idea/
 .DS_Store
 Thumbs.db
+
+#日志：绝对不许提交
+logs/
+*.log
+*.log.gz
