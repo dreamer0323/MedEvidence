@@ -1,0 +1,14 @@
+本目录下的 learning-mode.sh 改编自 Anthropic 官方插件 learning-output-style。
+
+  原始来源：github.com/anthropics/claude-plugins-official
+  插件路径：plugins/learning-output-style/hooks-handlers/session-start.sh
+  许可证：  Apache License, Version 2.0
+
+改编内容：把原插件注入的通用"学习模式"划分，替换为本项目自己的
+「会被面试追问 / 不会被追问」划分，并把语言改为中文。
+
+Apache-2.0 许可证全文见：
+  https://www.apache.org/licenses/LICENSE-2.0
+
+Copyright (c) Anthropic（原始实现）
+Copyright (c) 2026 31625（改编部分）

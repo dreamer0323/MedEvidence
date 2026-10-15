@@ -23,5 +23,15 @@ Thumbs.db
 
 #日志：绝对不许提交
 logs/
+log/
 *.log
 *.log.gz
+
+# 测试 / 工具缓存
+.pytest_cache/
+.ruff_cache/
+
+# 草稿:不提交
+scratch/
+
+

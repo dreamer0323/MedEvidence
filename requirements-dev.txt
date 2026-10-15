@@ -1,0 +1,4 @@
+# 开发期依赖（运行时不需要）
+# requirements.txt 是 pip freeze 的产物，别往里手塞东西；开发工具写这里。
+#   pip install -r requirements-dev.txt
+pytest>=8.0
