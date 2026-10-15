@@ -74,7 +74,7 @@ class EmbeddingClient:
         for bi in range(total_batches):
             batch = texts[bi * batch_size : (bi + 1) * batch_size]
             logger.info("%s: 批次 %d/%d（%d 条）", desc, bi + 1, total_batches, len(batch))
-            vectors.extend(self._embed_batch(batch))
+            vectors.extend(self._embed_batch(batch)) 
 
         return vectors
 

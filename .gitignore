@@ -11,7 +11,10 @@ venv/
 env/
 
 # 数据与向量库（体积大，第 2 周会用到）
-data/
+# ⚠️ 用 data/* 而不是 data/ —— 因为 Git 规定"父目录被整体排除时，无法再单独放行里面的文件"。
+#    语料清单 data/corpus.json 必须进 git：它是"评测可复现"的凭证（语料快照）。
+data/*
+!data/corpus.json
 *.sqlite3
 chroma/
 
