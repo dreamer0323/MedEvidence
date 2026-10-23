@@ -37,4 +37,11 @@ log/
 # 草稿:不提交
 scratch/
 
+# 教学回合的运行时状态（每次会话生成，含会话号，不该进仓库）
+.claude/hooks/state/
+
+# 临时放行开关：写它等于当场关掉闸门，绝不能进仓库
+.claude/hooks/GUARD-OFF
+.claude/hooks/MODE
+
 

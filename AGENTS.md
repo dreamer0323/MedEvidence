@@ -27,7 +27,11 @@
 | **不会被追问的支撑工作** | AI 直接做，不必征求同意 |
 
 受保护目录清单见 `.claude/hooks/protected-paths.txt`。
-写入受保护目录前，`guard.py` 会硬拦截，要求先回答三问。
+写入受保护目录前，`guard.py` 会硬拦截，要求先回答三问；答完并落进 `09`/`04` 之后自动放行。
+
+**开关只有一处**：`.claude/hooks/MODE`（`on` / `guard-only` / `teach-only` / `off`），
+用 `python .claude/hooks/mode.py status` 查看、`python .claude/hooks/mode.py <值>` 切换。
+改完**立即生效**，不用重开会话。自检报告里带注入证据和当前回合状态。
 
 闸门覆盖**两条通道**：文件工具（`Edit/Write/MultiEdit/NotebookEdit`）和
 Bash（`>` 重定向、`tee`、`sed -i`、`cp/mv` 目标、`dd of=`、`python -c`/heredoc）。
@@ -37,6 +41,8 @@ Bash（`>` 重定向、`tee`、`sed -i`、`cp/mv` 目标、`dd of=`、`python -c
 > 例如 `D=src; echo x > "$D/eval/a.py"`。闸门防的是"顺手代写"，不防刻意绕过。
 
 ## 三、接口约定（AI 猜不到、必须写下来的）
+
+> 数据在各层之间长什么样、谁拥有、落不落盘：见 `docs/data-model.md`（一页纸）。
 
 - 环境：Windows 11，Git Bash；Python 用 `python`（不是 `python3`）
 - 虚拟环境：`.venv`

@@ -6,11 +6,12 @@
 from __future__ import annotations
 
 import random
+from dataclasses import replace
 
 import pytest
 
 from src.config import EMBEDDING_DIM
-from src.vectorstore.milvus_store import MilvusStore
+from src.vectorstore.milvus_store import ChunkRow, MilvusStore
 
 COLLECTION = "chunks"
 
@@ -21,13 +22,16 @@ def _vec(seed: int) -> list[float]:
 
 
 def _row(seed: int, pmc_id: str, text: str, section: str = "Results", idx: int = 0):
-    return {
-        "vector": _vec(seed),
-        "text": text,
-        "pmc_id": pmc_id,
-        "section": section,
-        "chunk_index": idx,
-    }
+    return ChunkRow(
+        vector=_vec(seed),
+        text=text,
+        pmc_id=pmc_id,
+        section=section,
+        chunk_index=idx,
+        path=f"Methods / {section}",
+        source_type="sec",
+        text_hash=f"{seed:016x}",
+    )
 
 
 @pytest.fixture
@@ -47,14 +51,28 @@ def test_insert_count_and_search_roundtrip(store):
     assert store.insert(rows) == 3
     assert store.count() == 3
 
-    hits = store.search(rows[0]["vector"], top_k=3)
+    hits = store.search(rows[0].vector, top_k=3)
 
     assert len(hits) == 3
     # 用第 0 行的向量去查，它自己必须排第一，且相似度为 1
     assert hits[0]["pmc_id"] == "PMC111"
     assert hits[0]["score"] == pytest.approx(1.0, abs=1e-4)
     # 返回结构必须是抹平过的，上层不该看到 Milvus 的嵌套
-    assert set(hits[0]) == {"id", "score", "text", "pmc_id", "section", "chunk_index"}
+    assert set(hits[0]) == {
+        "id", "score", "text", "pmc_id", "section", "chunk_index", "path", "source_type",
+    }
+
+
+def test_existing_hashes_returns_only_those_in_store(store):
+    store.insert([_row(1, "PMC1", "a"), _row(2, "PMC2", "b")])
+    assert store.existing_hashes(["0000000000000001", "ffffffffffffffff"]) == {
+        "0000000000000001"
+    }
+
+
+def test_existing_hashes_empty_input_returns_empty_set(store):
+    """空列表必须提前返回 —— 空 filter 在 Milvus 里等于扫全库。"""
+    assert store.existing_hashes([]) == set()
 
 
 def test_ensure_collection_is_idempotent(store):
@@ -64,17 +82,14 @@ def test_ensure_collection_is_idempotent(store):
     assert store.count() == 1
 
 
-def test_insert_rejects_missing_field(store):
-    row = _row(1, "PMC111", "x")
-    del row["pmc_id"]
-    with pytest.raises(ValueError, match="pmc_id"):
-        store.insert([row])
-    assert store.count() == 0           # 校验失败不该留下半截数据
+def test_chunk_row_requires_every_field():
+    """缺字段在**构造期**就报错，不再靠 insert 里的运行时校验（类型化边界的意义）。"""
+    with pytest.raises(TypeError):
+        ChunkRow(vector=_vec(1), text="x")        # 缺 pmc_id / path / text_hash …
 
 
 def test_insert_rejects_wrong_dimension(store):
-    row = _row(1, "PMC111", "x")
-    row["vector"] = row["vector"][:512]
+    row = replace(_row(1, "PMC111", "x"), vector=_vec(1)[:512])
     with pytest.raises(ValueError, match="维度"):
         store.insert([row])
 

@@ -9,3 +9,5 @@ src/eval/
 src/agent/
 src/generate/
 src/ingest/
+src/embedding/
+src/vectorstore/

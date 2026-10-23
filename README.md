@@ -64,7 +64,7 @@ python -W ignore -m src.embedding.client    # 真调一次 BGE-M3，确认维度
 ## 第 2 周进度（数据管线：抓取 → 分块 → 入库 → 能检索）
 
 - [x] 项目骨架：配置层 / embedding 封装 / Milvus Lite 封装 / 单测
-- [ ] `src/ingest/`：esearch + efetch 抓 PMC OA 全文（1000 篇）
-- [ ] `src/ingest/`：XML 章节解析 + **结构化分块**（分块参数需自行决定）
+- [x] `src/ingest/`：esearch + efetch 抓 PMC OA 全文（1000 篇）
+- [x] `src/ingest/`：XML 章节解析 + **结构化分块**（分块参数需自行决定）
 - [ ] `src/ingest/build.py`：离线建库入口
 - [ ] `src/retrieve/`：向量检索跑通，能 print 出条数 + 检索出相关段落

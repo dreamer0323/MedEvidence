@@ -1,8 +1,19 @@
 #!/usr/bin/env python
 """PreToolUse 闸门：在受保护目录被写入前硬拦截。
 
-这是"反代写"三档里唯一的确定性档位 —— Claude Code 官方文档明确：
+"反代写"的确定性档位（第 3 档）—— Claude Code 官方文档明确：
 CLAUDE.md 只是上下文（建议性），要强制必须用 PreToolUse hook。
+
+三档自 v2 起补齐（此前文档只定义了两级，"中间那档"从未存在）：
+  1 建议性    —— CLAUDE.md / SessionStart 注入（learning-mode.sh）
+  2 半确定性  —— UserPromptSubmit 每轮提醒（prompt.py）+ Stop 阻断收尾（stop.py）
+  3 确定性    —— 本文件
+
+本文件同时是"教学回合"的开关（v2）：
+  拦下受保护写入 → 无活动回合则开一个（记 state），要求本人说清打算怎么做；
+  答完并落进 09/04、且本人开过口之后 → 放行，回合转入 pending_review；
+  之后由 stop.py 守住"检验"（复述 + 四维评分）那一环。
+  "本人开过口"由 prompt.py 记录，模型无法伪造 —— 这是防自放行的关键。
 
 覆盖两条通道：
   1. 文件工具（Edit / Write / MultiEdit / NotebookEdit）—— 读 tool_input.file_path
@@ -26,13 +37,30 @@ CLAUDE.md 只是上下文（建议性），要强制必须用 PreToolUse hook。
   命令里不含受保护路径的字面量时看不到，例如 `D=src; echo x > "$D/eval/a.py"`。
   闸门防的是"顺手代写"，不防刻意绕过。
 
-紧急放行：在项目里创建 .claude/hooks/GUARD-OFF 即可关闭本闸门。
+紧急放行：改 .claude/hooks/MODE（on | guard-only | teach-only | off）。
+  GUARD-OFF 是弃用别名，仍被尊重，但新写法只有 MODE 一处。
+自检：python .claude/hooks/mode.py status
 自测：python .claude/hooks/test_guard.py
 """
 import json
 import os
 import re
 import sys
+
+# hook 进程跑在"reduced environment"里，不能假设 stdout/stderr 的编码。
+# 框架按 UTF-8 解析我们的 JSON 与 stderr，所以显式锁死。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+# 状态机（教学回合）。导入失败不能连累闸门本身，退回纯拦截行为。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import _state as state
+except Exception:
+    state = None
 
 # 写入目标 = 最后一个非选项参数
 LAST_ARG_VERBS = {"cp", "mv", "rsync", "install"}
@@ -44,15 +72,45 @@ ANY_WRITE_VERBS = LAST_ARG_VERBS | ALL_ARG_VERBS | {"sed", "dd", "python", "pyth
 TOKEN_RE = re.compile(r'"[^"]*"|\'[^\']*\'|\S+')
 # 重定向操作符：> >> 1> 2>>   （排除 2>&1 这类）
 REDIR_RE = re.compile(r'^\d*>>?$')
+# 无空格重定向：把 `>>file` / `1>file` 拆成两个 token。
+# 只认 token 开头的 `\d*>>?`，且其后首字符不能是 `&`（否则会把 2>&1 / >&2 拆坏）。
+# 残留缺口：`echo x>file` 这种重定向符夹在词中间的写法仍看不到，已记入 test_guard.py。
+SPLIT_REDIR_RE = re.compile(r'^(\d*>>?)([^&].*)$')
+# heredoc：<<EOF / <<-EOF / <<'PY' / <<"PY"
+HEREDOC_RE = re.compile(r'^<<-?[\'"]?([A-Za-z_][A-Za-z0-9_]*)[\'"]?$')
+# 会把 heredoc 正文当代码执行的解释器
+INTERPRETERS = {
+    "python", "python3", "bash", "sh", "zsh",
+    "node", "perl", "ruby", "pwsh", "powershell",
+}
+
+
+_MSYS_RE = re.compile(r"^/([A-Za-z])/(.*)$")
+
+
+def _norm(p: str) -> str:
+    r"""Git Bash 的 /d/dev/x → D:/dev/x。
+
+    不归一化会**静默全放行**：Windows 的 Python 把 /d/dev/x 解析成
+    <当前盘>:\d\dev\x，于是读不到 protected-paths.txt、mention 为 None、
+    直接 return 0 —— 正是本文件开头说的"最坏的失败方式"。
+    从 Git Bash 里拿 $PWD 传进来就会踩到（实测过）。
+
+    注意本 docstring 必须是 raw —— 里面的 \d \x 在普通字符串里是非法转义，
+    会把整个文件变成 SyntaxError（踩过）。
+    """
+    s = (p or "").strip().strip('"').strip("'").replace("\\", "/")
+    m = _MSYS_RE.match(s)
+    return (m.group(1).upper() + ":/" + m.group(2)) if m else s
 
 
 def resolve_root() -> str:
     if len(sys.argv) > 1 and sys.argv[1].strip():
-        return sys.argv[1].strip()
+        return _norm(sys.argv[1])
     env = os.environ.get("CLAUDE_PROJECT_DIR")
     if env and env.strip():
-        return env.strip()
-    return os.getcwd()
+        return _norm(env)
+    return _norm(os.getcwd())
 
 
 def load_protected(hook_dir: str):
@@ -81,8 +139,13 @@ def build_matcher(protected):
     return lambda s: bool(pat.search(s or ""))
 
 
-def to_rel(path: str, root: str):
-    """把路径规范化为相对 root 的形式；不在 root 之下返回 None。"""
+def to_rel(path: str, root: str, cwd: str = None):
+    """把路径规范化为相对 root 的形式；不在 root 之下返回 None。
+
+    cwd 用于兜住"启动根不等于项目根"的情形：当会话从 plan/ 启动时，
+    文件工具可能给出相对 plan/ 的路径（如 MedEvidence/src/eval/a.py），
+    只按 root 比会当成普通相对路径漏判。给了 cwd 就先拼成绝对路径再比一次。
+    """
     p = (path or "").strip().strip('"').strip("'").replace("\\", "/")
     if not p:
         return None
@@ -95,6 +158,10 @@ def to_rel(path: str, root: str):
         return ""
     if re.match(r'^[A-Za-z]:/', p) or p.startswith("/"):
         return None          # 绝对路径但不在项目内
+    if cwd:
+        c = cwd.strip().strip('"').strip("'").replace("\\", "/").rstrip("/")
+        if c:
+            return to_rel(c + "/" + p, root)   # 拼出来是绝对路径，不会再递归
     return p
 
 
@@ -110,6 +177,13 @@ def is_protected(rel, protected) -> bool:
 def tokenize(cmd: str):
     out = []
     for t in TOKEN_RE.findall(cmd):
+        # 先把无空格重定向拆开，否则 `>>src/eval/a.py` 会整体成一个 token 而漏判
+        # （引号开头的 token 不拆，避免破坏 "a > b" 这种字面量）
+        if t[:1] not in "\"'":
+            m = SPLIT_REDIR_RE.match(t)
+            if m:
+                out.append(m.group(1))
+                t = m.group(2)
         if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
             t = t[1:-1]
         out.append(t)
@@ -167,7 +241,7 @@ def analyze_segment(cmd: str, toks, mention) -> bool:
     return False
 
 
-def bash_blocks(command: str, root: str, protected, mention) -> bool:
+def bash_blocks(command: str, root: str, protected, mention, cwd: str = None) -> bool:
     if not command or mention is None:
         return False
     # 命令里根本没提到受保护路径 → 一律放行（含拼字符串绕过的情形）
@@ -175,13 +249,29 @@ def bash_blocks(command: str, root: str, protected, mention) -> bool:
         return False
 
     cd_into_protected = False
+    heredoc_marker = None
     for seg in split_segments(command):
+        # heredoc 正文：整段当代码执行，只要提到受保护路径就算
+        if heredoc_marker is not None:
+            if seg.strip() == heredoc_marker:
+                heredoc_marker = None
+            elif mention(seg):
+                return True
+            continue
         toks = tokenize(seg)
         if not toks:
             continue
+        # 解释器 + heredoc：正文会走 stdin 被当代码执行，盯住随后几段
+        base0 = toks[0].replace("\\", "/").rstrip("/").split("/")[-1].lower()
+        if base0 in INTERPRETERS:
+            for t in toks:
+                m = HEREDOC_RE.match(t)
+                if m:
+                    heredoc_marker = m.group(1)
+                    break
         # cd 进受保护目录
         if toks[0] == "cd" and len(toks) > 1:
-            if is_protected(to_rel(toks[1], root), protected):
+            if is_protected(to_rel(toks[1], root, cwd), protected):
                 cd_into_protected = True
                 continue
         if analyze_segment(seg, toks, mention):
@@ -194,11 +284,41 @@ def bash_blocks(command: str, root: str, protected, mention) -> bool:
     return False
 
 
+def emit_block(reason: str, missing=None, root: str = None) -> None:
+    """阻断文案。
+
+    `⛔ 这是会被面试追问的目录` 是本文档独有的字符串 —— 文档与自测都靠它
+    区分"是闸门拦的"还是"别的东西拦的"，不要改。
+    """
+    # 只问前瞻问题 —— 代码还没写，回顾性的问题（实测如何、追问三层答得上吗）
+    # 归后段的 stop.py。在这里问等于让人编。
+    q = state.FRONT_QUESTIONS if state else (
+        "动手之前先说清楚（本人说，不要替他答）：\n"
+        "  1. 你打算怎么做？为什么这么选？代价是什么？\n"
+        "  2. 你打算怎么验证它？（说清指标和实验设计 —— 说方法，不是结果）\n\n")
+    r = state.routing(root) if state else (
+        "落点：项目同级的 09-决策记录.md / 04-怀疑清单.md（若不存在则跳过落盘）\n\n")
+    extra = ""
+    if missing:
+        extra = ("还差这些条件才会自动放行：\n"
+                 + "".join("  ✗ %s\n" % m for m in missing) + "\n")
+    sys.stderr.write(
+        "⛔ 这是会被面试追问的目录（命中：%s）。\n\n%s%s%s"
+        "前瞻两问答完（并按上面的落点要求记录）且本人开过口之后，写入会自动放行。\n"
+        "要整体关掉闸门：改 .claude/hooks/MODE（on | guard-only | teach-only | off）。\n"
+        % (reason, q, r, extra)
+    )
+
+
 def main() -> int:
     root = resolve_root()
     hook_dir = os.path.join(root, ".claude", "hooks")
 
-    if os.path.exists(os.path.join(hook_dir, "GUARD-OFF")):
+    # 单一开关 MODE 优先；_state 不可用时退回旧的 GUARD-OFF 检查
+    if state is not None:
+        if not state.guard_active():
+            return 0
+    elif os.path.exists(os.path.join(hook_dir, "GUARD-OFF")):
         return 0
 
     try:
@@ -213,6 +333,8 @@ def main() -> int:
 
     tool_input = payload.get("tool_input") or {}
     reason = None
+    # 会话的当前工作目录（框架注入）。用于兜住"启动根 ≠ 项目根"的相对路径漏判。
+    cwd = payload.get("cwd") or ""
 
     # —— 通道 1：文件工具 ——
     path = (
@@ -221,28 +343,47 @@ def main() -> int:
         or tool_input.get("path")
     )
     if path:
-        rel = to_rel(path, root)
+        rel = to_rel(path, root, cwd)
         if is_protected(rel, protected):
             reason = rel
     else:
         # —— 通道 2：Bash ——
         command = tool_input.get("command")
-        if command and bash_blocks(command, root, protected, mention):
-            reason = "Bash 命令（重定向 / tee / sed -i / cp 目标 / cd 后写入 等）"
+        if command and bash_blocks(command, root, protected, mention, cwd):
+            reason = "Bash 命令（重定向 / tee / sed -i / cp 目标 / cd 后写入 / heredoc 等）"
 
     if reason is None:
         return 0
 
-    sys.stderr.write(
-        "⛔ 这是会被面试追问的目录（命中：%s）。\n\n"
-        "在动手之前，先用三句话回答：\n"
-        "  1. 我为什么选这个做法？代价是什么？\n"
-        "  2. 我怎么验证它是对的？（指标 / 实验）\n"
-        "  3. 面试官追问三层时，我答得上哪一层、答不上哪一层？\n\n"
-        "答完把答案写进 plan/09-决策记录.md，再让本人回复「继续」，本次即可放行。\n"
-        "若确实需要长期放行，由本人手动创建空文件 .claude/hooks/GUARD-OFF。\n" % reason
-    )
-    return 2
+    # —— 教学回合 ——
+    # 拦下不只是"拦一次"，它是一个决策点：开一个回合，把产出和检验逼出来。
+    # 状态机见 _state.py；判定原则是"闸门守实践入口，stop.py 守检验出口"。
+    if state is None:
+        emit_block(reason, root=root)     # 状态模块缺失，退回纯拦截
+        return 2
+
+    data = state.load()
+    rnd = data.get("round")
+
+    if rnd and state.round_is_stale(rnd):
+        state.close_round(data, "stale")   # 陈旧回合：清理，避免永久阻断
+        rnd = None
+
+    if rnd is None:
+        state.open_round(reason, root)
+        emit_block(reason, ["本回合刚开始：先说清你打算怎么做，再动手写"], root=root)
+        return 2
+
+    if rnd.get("state") == "blocking":
+        ok, missing = state.release_ready(rnd, data, root)
+        if ok:
+            state.release_round(rnd, data, root)
+            return 0
+        emit_block(reason, missing, root=root)
+        return 2
+
+    # pending_review：同一回合内继续写别的受保护文件，直接放行
+    return 0
 
 
 if __name__ == "__main__":

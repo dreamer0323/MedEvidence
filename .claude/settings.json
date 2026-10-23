@@ -6,7 +6,20 @@
           {
             "type": "command",
             "command": "bash \"D:/dev/agent/agent_dev/plan/MedEvidence/.claude/hooks/learning-mode.sh\"",
-            "timeout": 15
+            "timeout": 15,
+            "on_failure": "continue"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"D:/dev/agent/agent_dev/plan/MedEvidence/.claude/hooks/prompt.py\"",
+            "timeout": 10,
+            "on_failure": "continue"
           }
         ]
       }
@@ -18,7 +31,20 @@
           {
             "type": "command",
             "command": "python \"D:/dev/agent/agent_dev/plan/MedEvidence/.claude/hooks/guard.py\" \"D:/dev/agent/agent_dev/plan/MedEvidence\"",
-            "timeout": 10
+            "timeout": 10,
+            "on_failure": "continue"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"D:/dev/agent/agent_dev/plan/MedEvidence/.claude/hooks/stop.sh\"",
+            "timeout": 10,
+            "on_failure": "continue"
           }
         ]
       }

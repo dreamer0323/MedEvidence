@@ -29,12 +29,15 @@ RAW_DIR = DATA_DIR / "raw"              # esearch / efetch 下来的原始 XML
 PROCESSED_DIR = DATA_DIR / "processed"  # 解析分块后的 jsonl
 LOG_DIR = PROJECT_ROOT / "log"
 
+# 显式指定 .env 路径，不依赖"当前工作目录恰好是项目根"
+# ⚠️ 必须在下面读 `MILVUS_URI` 之前加载，否则 .env 里的值读不到
+dotenv.load_dotenv(PROJECT_ROOT / ".env", override=False)
+
 # ⚠️ Milvus Lite 的 uri 传进来后，建出来的是一个**同名目录**，不是一个文件。
 # 所以别用 `Path(MILVUS_URI).exists()` 判断"库建好没有"，用 has_collection()。
-MILVUS_URI = str(DATA_DIR / "medevidence.db")
-
-# 显式指定 .env 路径，不依赖"当前工作目录恰好是项目根"
-dotenv.load_dotenv(PROJECT_ROOT / ".env", override=False)
+# 本地默认 data/medevidence.db；云端部署用环境变量指向服务器上的路径。
+# Lite 是**嵌入式**的：建库进程必须和 .db 在同一台机器上，不能远程连。
+MILVUS_URI = os.getenv("MILVUS_URI", "").strip() or str(DATA_DIR / "medevidence.db")
 
 # --------------------------------------------------------------- 常量
 
