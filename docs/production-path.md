@@ -37,12 +37,37 @@ data/medevidence.db/          ← 目录，不是文件
 | 语料 | 1,622 篇 PMC OA 全文 |
 | 块数 | **26,230**（27,569 切出，过滤 4.9% 占位符） |
 | 磁盘 | **252 MB**（向量 107 MB + 索引 105 MB + parquet/文本 + WAL） |
+| **进程内存** | **696 MiB**（开库 + load 索引后；其中 pymilvus 自身 import 占 93 MiB），检索后 699 MiB |
 | 开库 + load | **394 ms**（每进程一次，`search` 前必须 `load_collection`） |
 | 单问检索 | embedding **297 ms** + 向量检索 **37.8 ms** ≈ **335 ms** |
 | 写侧 | **单进程独占**：数据目录有 `LOCK`（Windows `msvcrt.locking`），第二个进程抛 `DataDirLockedError` |
 | 多 worker | **不可用**：`uvicorn --workers 4` = 4 个进程抢同一数据目录 |
 
-> 复现：`.\.venv\Scripts\python -m scratch.time_retrieval`（临时探针，第 4 周迁到 `src/eval/probe.py`）
+> 复现：`.\.venv\Scripts\python -m scratch.time_retrieval` / `scratch.mem_probe`（临时探针，第 4 周迁到 `src/eval/probe.py`）
+
+### 1.1 部署到 2C2G 云服务器（第 4 周 v0）的内存预算
+
+**实测服务器**（2026-10-25）：Ubuntu 22.04 / 2 vCPU / **内存 1608 MiB** / **无 swap** / 40G 盘（可用 27G）。
+
+| 项 | MiB |
+|---|---|
+| 可用内存（`MemAvailable`） | 1094 |
+| app 进程（pymilvus + 库 + 索引，实测） | −696 |
+| OS + 系统服务预留 | ~150 |
+| **余量** | **~250** |
+
+**结论：能跑，但没有余量。** 无 swap 时 OOM killer 会直接杀进程，表现是「服务莫名重启、日志里没有 traceback」——这类故障最难查。
+
+两件必做的事：
+
+1. 加 **2 GB swapfile**（是保险，不是性能手段），`vm.swappiness=10`
+2. 上真机后重测：`grep VmRSS /proc/$(pgrep -f uvicorn)/status`（Linux 有 page cache，可能略低于 Windows 的 696）
+
+> 注：`store.close()` 之后 RSS 仍是 699 MiB —— 进程内的 Arrow / FAISS 结构要等**进程退出**才回收。
+> 所以「用完就关」省不了内存，预算要按常驻算。
+
+❌ **Milvus standalone 在这台机器上判死刑**：官方最低 8 GB，这台总数 1608 MiB，差 5 倍，不是"勉强"。
+云端独立向量库的教学价值留到第 9 周**按量升配**（跑几天、练完降配），不为此换库、也不为此现在升配。
 
 ---
 
