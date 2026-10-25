@@ -46,6 +46,7 @@ COLLECTION_NAME = "chunks"
 # 而不是等插入时炸在 Milvus 里。超长 chunk 会直接抛错，不会静默截断。
 MAX_TEXT_LEN = 8192
 MAX_ID_LEN = 64
+MAX_PK_LEN = 64                 # "{pmc_id}:{chunk_index}"，实测最长 ~20
 MAX_SECTION_LEN = 256
 # 完整章节路径实测最长拼出 1125 字符，留一倍余量
 MAX_PATH_LEN = 2048
@@ -66,6 +67,7 @@ class ChunkRow:
     只做浅转换（`to_dict` 不复制 1024 维向量），避免每批多拷 4MB。
     """
 
+    pk: str                         # "{pmc_id}:{chunk_index}" —— 稳定的行身份
     vector: list[float]
     text: str
     pmc_id: str
@@ -73,11 +75,12 @@ class ChunkRow:
     chunk_index: int
     path: str                       # " / ".join(path)，字符串不是列表
     source_type: str
-    text_hash: str                  # sha256(chunk.embed_input)
+    text_hash: str                  # sha256(chunk.embed_input)，只做内容指纹
 
     def to_dict(self) -> dict:
         """转成 pymilvus 要的 dict。浅拷贝：vector 传引用。"""
         return {
+            "pk": self.pk,
             "vector": self.vector,
             "text": self.text,
             "pmc_id": self.pmc_id,
@@ -127,11 +130,18 @@ class MilvusStore:
             self.client.drop_collection(self.collection)
 
         if self.has_collection():
-            logger.info("集合 %s 已存在，跳过建表", self.collection)
+            # ⚠️ Milvus Lite 在新进程里打开已存在的集合时是 released 状态：
+            #    不 load 的话 query / search 会报
+            #    "Collection 'chunks' is in state 'released'; call load() before search/get/query"。
+            #    第一次建库不会遇到（同进程刚建完是 loaded），第二次运行才暴露。
+            self.client.load_collection(self.collection)
+            logger.info("集合 %s 已存在，已加载", self.collection)
             return
 
-        schema = self.client.create_schema(auto_id=True, enable_dynamic_field=False)
-        schema.add_field("id", DataType.INT64, is_primary=True)
+        # auto_id=False + 业务主键：行有了稳定身份，才能 upsert / 对账删除。
+        # 用自增 id 时，重复插入只会追加，旧行永远清不掉（见 plan/09 主键方案 C）。
+        schema = self.client.create_schema(auto_id=False, enable_dynamic_field=False)
+        schema.add_field("pk", DataType.VARCHAR, is_primary=True, max_length=MAX_PK_LEN)
         schema.add_field("vector", DataType.FLOAT_VECTOR, dim=self.dim)
         schema.add_field("text", DataType.VARCHAR, max_length=MAX_TEXT_LEN)
         schema.add_field("pmc_id", DataType.VARCHAR, max_length=MAX_ID_LEN)
@@ -166,11 +176,12 @@ class MilvusStore:
 
     # ------------------------------------------------------------ 写入
 
-    def insert(self, rows: list[ChunkRow], *, batch_size: int = 1000) -> int:
-        """写入 chunk 行，返回写入条数。
+    def upsert(self, rows: list[ChunkRow], *, batch_size: int = 1000) -> int:
+        """按 pk 写入：pk 不存在则插入，存在则**覆盖**。返回实际写入行数。
 
-        字段是否存在由 `ChunkRow` 在构造时保证；这里只校验**长度和维度**——
-        这些是数据本身的问题，Milvus 的报错对应不回你的数据源。
+        ⚠️ 计数必须用 `raw["insert_count"]`，不能用 `len(raw)`：
+        大批量时 Milvus 会省略返回的 ids，`len(raw)` 会变成 0
+        （真的踩过：14,226 行只打印出 45）。
         """
         if not rows:
             return 0
@@ -179,6 +190,8 @@ class MilvusStore:
         for i in range(0, len(rows), batch_size):
             batch = rows[i : i + batch_size]
             for j, row in enumerate(batch):
+                if len(row.pk) > MAX_PK_LEN:
+                    raise ValueError(f"第 {i + j} 行 pk 长度 {len(row.pk)} 超过 {MAX_PK_LEN}")
                 if len(row.vector) != self.dim:
                     raise ValueError(
                         f"第 {i + j} 行向量维度 {len(row.vector)} != {self.dim}"
@@ -196,9 +209,9 @@ class MilvusStore:
                     raise ValueError(f"第 {i + j} 行 source_type 不合法：{row.source_type}")
                 if len(row.text_hash) > MAX_HASH_LEN:
                     raise ValueError(f"第 {i + j} 行 text_hash 长度超过 {MAX_HASH_LEN}")
-            total += len(
-                self.client.insert(self.collection, [r.to_dict() for r in batch])
-            )
+            raw = self.client.upsert(self.collection, [r.to_dict() for r in batch])
+            # ⚠️ upsert 返回的键是 upsert_count（insert 才是 insert_count）
+            total += int(raw.get("upsert_count", len(batch)))
 
         logger.info("写入 %d 行到 %s", total, self.collection)
         return total
@@ -237,6 +250,33 @@ class MilvusStore:
             found.update(row["text_hash"] for row in rows)
         return found
 
+    def rows_by_pmc(self, pmc_id: str) -> dict[str, str]:
+        """返回某篇文章在库里的 `{pk: text_hash}` —— 对账用（方案 C）。
+
+        调用方拿它和当前解析出的 pk/ hash 集合做差：
+        新 pk 插入、hash 变 upsert、hash 同跳过、库里有当前没有的删除。
+        """
+        rows = self.client.query(
+            collection_name=self.collection,
+            filter=f'pmc_id == "{pmc_id}"',
+            output_fields=["pk", "text_hash"],
+            consistency_level="Strong",
+        )
+        return {row["pk"]: row["text_hash"] for row in rows}
+
+    def delete_pks(self, pks: list[str], *, batch_size: int = 1000) -> int:
+        """按 pk 删除（清孤儿 / 影子块），返回删除条数。"""
+        if not pks:
+            return 0
+
+        deleted = 0
+        for start in range(0, len(pks), batch_size):
+            part = pks[start : start + batch_size]
+            expr = "pk in [" + ", ".join(f'"{p}"' for p in part) + "]"
+            deleted += len(self.client.delete(self.collection, filter=expr))
+        logger.info("删除 %d 行（%s）", deleted, self.collection)
+        return deleted
+
     # ------------------------------------------------------------ 检索
 
     def search(
@@ -269,7 +309,8 @@ class MilvusStore:
 
         return [
             {
-                "id": hit["id"],
+                # VARCHAR 主键在命中结果里的键是 "pk"（INT64 自增时才是 "id"）
+                "pk": hit.get("pk", hit.get("id")),
                 "score": hit["distance"],          # COSINE 相似度，越大越像
                 "text": hit["entity"]["text"],
                 "pmc_id": hit["entity"]["pmc_id"],

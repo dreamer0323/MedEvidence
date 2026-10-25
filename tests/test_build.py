@@ -1,13 +1,25 @@
 """build.py 的两块纯逻辑：样板节过滤 + text_hash。不连库、不调 API。"""
 from __future__ import annotations
 
-from src.ingest.build import boilerplate_rule, text_hash
+from src.config import EMBEDDING_DIM
+from src.ingest.build import (
+    boilerplate_rule,
+    chunk_pk,
+    plan_reconciliation,
+    text_hash,
+    to_row,
+)
 from src.ingest.chunk import SOURCE_SEC, Chunk
+from src.vectorstore import MAX_SECTION_LEN
 
 
-def mk(path: list[str], section: str = "", text: str = "Body.") -> Chunk:
+def mk(
+    path: list[str], section: str = "", text: str = "Body.",
+    pmc_id: str = "PMC1", idx: int = 0,
+) -> Chunk:
     return Chunk(
-        pmc_id="PMC1", section=section, path=path, source_type=SOURCE_SEC, text=text
+        pmc_id=pmc_id, section=section, path=path, source_type=SOURCE_SEC,
+        text=text, chunk_index=idx,
     )
 
 
@@ -52,3 +64,49 @@ def test_text_hash_is_stable_for_identical_input():
     assert text_hash(mk(["Methods"], "Methods", "We did X.")) == text_hash(
         mk(["Methods"], "Methods", "We did X.")
     )
+
+
+def test_chunk_pk_is_source_specific():
+    """同样的正文、不同文章 → 不同身份；否则第二篇会检索不到（方案 C 的动机）。"""
+    a = mk(["Methods"], "Methods", "same text", pmc_id="PMC1")
+    b = mk(["Methods"], "Methods", "same text", pmc_id="PMC2")
+    assert chunk_pk(a) != chunk_pk(b)
+
+
+def test_reconciliation_new_chunk_needs_embedding():
+    c = mk(["Methods"], "Methods", "X", idx=0)
+    todo, stale, skipped = plan_reconciliation([c], {})
+    assert todo == [c] and stale == [] and skipped == 0
+
+
+def test_reconciliation_unchanged_is_skipped():
+    c = mk(["Methods"], "Methods", "X", idx=0)
+    todo, stale, skipped = plan_reconciliation([c], {chunk_pk(c): text_hash(c)})
+    assert todo == [] and stale == [] and skipped == 1
+
+
+def test_reconciliation_changed_text_is_reembedded():
+    old = mk(["Methods"], "Methods", "old text", idx=0)
+    new = mk(["Methods"], "Methods", "new text", idx=0)
+    todo, _, skipped = plan_reconciliation([new], {chunk_pk(old): text_hash(old)})
+    assert todo == [new] and skipped == 0
+
+
+def test_reconciliation_deletes_stale_pk():
+    c = mk(["Methods"], "Methods", "X", idx=0)
+    existing = {chunk_pk(c): text_hash(c), "PMC9:7": "deadbeef"}
+    _, stale, _ = plan_reconciliation([c], existing)
+    assert stale == ["PMC9:7"]
+
+
+def test_to_row_truncates_overlong_section_and_warns(caplog):
+    """实测只有 1 个节超长（261 字符）；截断展示标题，正文与路径不受影响。"""
+    c = mk(["Methods"], section="T" * 300, text="Body stays intact.")
+    with caplog.at_level("WARNING"):
+        row = to_row(c, [0.0] * EMBEDDING_DIM)
+
+    assert len(row.section) == MAX_SECTION_LEN
+    assert row.section == "T" * MAX_SECTION_LEN
+    assert row.text == "Body stays intact."      # ⚠️ 正文绝不截断
+    assert row.path == "Methods"                  # 完整层级不动
+    assert "截断" in caplog.text

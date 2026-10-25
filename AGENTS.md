@@ -29,6 +29,10 @@
 受保护目录清单见 `.claude/hooks/protected-paths.txt`。
 写入受保护目录前，`guard.py` 会硬拦截，要求先回答三问；答完并落进 `09`/`04` 之后自动放行。
 
+**闸门粒度（2026-10-25 起）**：按**功能**批准，不按文件、不按轮次。
+一个功能开工前回答一次三问并落 `09`/`04`，之后该功能涉及的所有受保护文件
+由 AI **在同一回合内批量写完、一次跑测**；不再对同一功能重复提问。
+
 **开关只有一处**：`.claude/hooks/MODE`（`on` / `guard-only` / `teach-only` / `off`），
 用 `python .claude/hooks/mode.py status` 查看、`python .claude/hooks/mode.py <值>` 切换。
 改完**立即生效**，不用重开会话。自检报告里带注入证据和当前回合状态。

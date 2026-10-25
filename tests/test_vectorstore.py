@@ -23,6 +23,7 @@ def _vec(seed: int) -> list[float]:
 
 def _row(seed: int, pmc_id: str, text: str, section: str = "Results", idx: int = 0):
     return ChunkRow(
+        pk=f"{pmc_id}:{idx}",
         vector=_vec(seed),
         text=text,
         pmc_id=pmc_id,
@@ -48,7 +49,7 @@ def test_insert_count_and_search_roundtrip(store):
         _row(2, "PMC222", "全切片图像的染色差异"),
         _row(3, "PMC333", "FISH 检测 HER2 扩增"),
     ]
-    assert store.insert(rows) == 3
+    assert store.upsert(rows) == 3
     assert store.count() == 3
 
     hits = store.search(rows[0].vector, top_k=3)
@@ -59,12 +60,12 @@ def test_insert_count_and_search_roundtrip(store):
     assert hits[0]["score"] == pytest.approx(1.0, abs=1e-4)
     # 返回结构必须是抹平过的，上层不该看到 Milvus 的嵌套
     assert set(hits[0]) == {
-        "id", "score", "text", "pmc_id", "section", "chunk_index", "path", "source_type",
+        "pk", "score", "text", "pmc_id", "section", "chunk_index", "path", "source_type",
     }
 
 
 def test_existing_hashes_returns_only_those_in_store(store):
-    store.insert([_row(1, "PMC1", "a"), _row(2, "PMC2", "b")])
+    store.upsert([_row(1, "PMC1", "a"), _row(2, "PMC2", "b")])
     assert store.existing_hashes(["0000000000000001", "ffffffffffffffff"]) == {
         "0000000000000001"
     }
@@ -75,9 +76,29 @@ def test_existing_hashes_empty_input_returns_empty_set(store):
     assert store.existing_hashes([]) == set()
 
 
+def test_upsert_overwrites_same_pk(store):
+    """同 pk 再写一次是覆盖，不是追加 —— 方案 C 的基础。"""
+    store.upsert([_row(1, "PMC1", "old", idx=0)])
+    assert store.upsert([_row(2, "PMC1", "new", idx=0)]) == 1
+    assert store.count() == 1
+    assert store.search(_vec(2), top_k=1)[0]["text"] == "new"
+
+
+def test_rows_by_pmc_returns_pk_hash_map(store):
+    store.upsert([_row(1, "PMC1", "a"), _row(2, "PMC2", "b")])
+    assert store.rows_by_pmc("PMC1") == {"PMC1:0": "0000000000000001"}
+    assert store.rows_by_pmc("PMC404") == {}
+
+
+def test_delete_pks_removes_rows(store):
+    store.upsert([_row(1, "PMC1", "a"), _row(2, "PMC2", "b")])
+    assert store.delete_pks(["PMC1:0"]) == 1
+    assert store.count() == 1
+
+
 def test_ensure_collection_is_idempotent(store):
     store.ensure_collection()          # 第二次调用不该炸，也不该清空
-    store.insert([_row(1, "PMC111", "x")])
+    store.upsert([_row(1, "PMC111", "x")])
     store.ensure_collection()
     assert store.count() == 1
 
@@ -91,14 +112,14 @@ def test_chunk_row_requires_every_field():
 def test_insert_rejects_wrong_dimension(store):
     row = replace(_row(1, "PMC111", "x"), vector=_vec(1)[:512])
     with pytest.raises(ValueError, match="维度"):
-        store.insert([row])
+        store.upsert([row])
 
 
 def test_insert_rejects_overlong_text(store):
     """超长 chunk 必须在写入端炸掉 —— 静默截断会让引用内容不完整。"""
     row = _row(1, "PMC111", "长" * 9000)
     with pytest.raises(ValueError, match="分块参数"):
-        store.insert([row])
+        store.upsert([row])
 
 
 def test_search_rejects_wrong_query_dimension(store):
@@ -107,4 +128,4 @@ def test_search_rejects_wrong_query_dimension(store):
 
 
 def test_insert_empty_list_is_noop(store):
-    assert store.insert([]) == 0
+    assert store.upsert([]) == 0

@@ -27,7 +27,7 @@ from src.config import MILVUS_URI, RAW_DIR, setup_logging
 from src.embedding import EmbeddingClient
 from src.ingest.chunk import Chunk, build_chunks
 from src.ingest.parse_pmc import parse_article
-from src.vectorstore import ChunkRow, MilvusStore
+from src.vectorstore import MAX_SECTION_LEN, ChunkRow, MilvusStore
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,15 @@ def boilerplate_rule(chunk: Chunk) -> str | None:
     return None
 
 
+def chunk_pk(chunk: Chunk) -> str:
+    """稳定的行身份：`{pmc_id}:{chunk_index}`。
+
+    ⚠️ 不是内容哈希。内容相同的两段文本在不同文章里是**两块**，
+    各自要有自己的引用；用内容当身份会让第二篇检索不到（见 plan/09 主键方案 C）。
+    """
+    return f"{chunk.pmc_id}:{chunk.chunk_index}"
+
+
 def text_hash(chunk: Chunk) -> str:
     """哈希对象 = 喂给 embedding 的字符串，不是入库的 text。
 
@@ -84,12 +93,26 @@ def text_hash(chunk: Chunk) -> str:
 
 
 def to_row(chunk: Chunk, vector: list[float]) -> ChunkRow:
-    """Chunk → 存储层契约。**全项目唯一的结构转换点**（见 docs/data-model.md）。"""
+    """Chunk → 存储层契约。**全项目唯一的结构转换点**（见 docs/data-model.md）。
+
+    `section` 超长时截断并打 warning：它只是展示字段，完整层级在 `path` 里。
+    实测全量只有 1 个节超长（261 字符），为它重建整个集合不划算。
+    ⚠️ `text` 不许这样处理——正文截断就是丢证据，超长必须抛错。
+    """
+    section = chunk.section
+    if len(section) > MAX_SECTION_LEN:
+        logger.warning(
+            "section 超长截断：%s chunk=%d %d→%d（完整层级在 path）",
+            chunk.pmc_id, chunk.chunk_index, len(section), MAX_SECTION_LEN,
+        )
+        section = section[:MAX_SECTION_LEN]
+
     return ChunkRow(
+        pk=chunk_pk(chunk),
         vector=vector,
         text=chunk.text,
         pmc_id=chunk.pmc_id,
-        section=chunk.section,
+        section=section,
         chunk_index=chunk.chunk_index,
         path=" / ".join(chunk.path),   # Milvus 列是 VARCHAR，列表要拼成字符串
         source_type=chunk.source_type,
@@ -97,10 +120,10 @@ def to_row(chunk: Chunk, vector: list[float]) -> ChunkRow:
     )
 
 
-def collect_chunks(raw_dir: Path, limit: int | None, stats: Counter | None = None):
-    """按文档序产出要入库的 chunk。过滤在这里，统计写进调用方传进来的 Counter。
+def iter_articles(raw_dir: Path, limit: int | None, stats: Counter | None = None):
+    """按文档序产出 `(pmc_id, [要入库的 chunk])`。
 
-    ⚠️ 统计必须由调用方持有：生成器跑完就没了，内部的 Counter 外面拿不到。
+    对账必须以**篇**为单位：要判断"库里多出来的 pk"，必须先知道这一篇的完整 pk 集合。
     """
     stats = Counter() if stats is None else stats
     files = sorted(raw_dir.glob("*.xml"))
@@ -115,14 +138,31 @@ def collect_chunks(raw_dir: Path, limit: int | None, stats: Counter | None = Non
             logger.warning("%s 解析失败：%s", path.name, err)
             continue
 
-        stats["articles"] += 1
+        kept: list[Chunk] = []
         for chunk in build_chunks(article):
             rule = boilerplate_rule(chunk)
             if rule:
                 stats[f"dropped:{rule}"] += 1
                 continue
-            stats["chunks"] += 1
-            yield chunk
+            kept.append(chunk)
+
+        stats["articles"] += 1
+        stats["chunks"] += len(kept)
+        yield article.pmc_id, kept
+
+
+def plan_reconciliation(chunks: list[Chunk], existing: dict[str, str]):
+    """对账（纯函数，好测）：返回 `(要向量化的块, 要删除的 pk, 跳过数)`。
+
+    · 库里没有这个 pk → 新块，要向量化
+    · 有 pk 但 hash 不同 → 文本变了，要重新向量化（upsert 覆盖）
+    · 有 pk 且 hash 相同 → 跳过，一分钱不花
+    · 库里有、当前没有 → 影子块 / 孤儿，删除
+    """
+    current = {chunk_pk(c): text_hash(c) for c in chunks}
+    to_embed = [c for c in chunks if existing.get(chunk_pk(c)) != current[chunk_pk(c)]]
+    stale = [pk for pk in existing if pk not in current]
+    return to_embed, stale, len(chunks) - len(to_embed)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -136,10 +176,10 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("MILVUS_URI = %s", MILVUS_URI)
 
     stats = Counter()
-    chunks = collect_chunks(Path(RAW_DIR), args.limit, stats)
+    articles = iter_articles(Path(RAW_DIR), args.limit, stats)
 
     if args.dry_run:
-        for _ in chunks:
+        for _pmc_id, _chunks in articles:
             pass
         print(f"文章 {stats['articles']}（解析失败 {stats['parse_failed']}）")
         print(f"入库块 {stats['chunks']}")
@@ -149,39 +189,43 @@ def main(argv: list[str] | None = None) -> int:
 
     client = EmbeddingClient()
     api_texts = 0                 # 实际送去 embedding 的条数（幂等验收用）
+    pending: list[Chunk] = []     # 需要向量化的块（新增 + 变更）
+    stale: list[str] = []         # 库里多余、要删除的 pk
 
     with MilvusStore() as store:
         store.ensure_collection(drop=args.drop)
 
-        batch: list[Chunk] = []
+        # 阶段一：按篇对账，决定"谁要花钱、谁要删"（不调 API）
+        for pmc_id, chunks in articles:
+            existing = store.rows_by_pmc(pmc_id)
+            todo, gone, skipped = plan_reconciliation(chunks, existing)
+            pending.extend(todo)
+            stale.extend(gone)
+            stats["skipped"] += skipped
+            stats["new"] += sum(1 for c in todo if chunk_pk(c) not in existing)
+            stats["updated"] += len(todo) - sum(
+                1 for c in todo if chunk_pk(c) not in existing
+            )
 
-        def flush() -> None:
-            nonlocal api_texts
-            if not batch:
-                return
-            hashes = [text_hash(c) for c in batch]
-            existing = store.existing_hashes(hashes)
-            todo = [c for c, h in zip(batch, hashes) if h not in existing]
-            stats["skipped"] += len(batch) - len(todo)
-            if todo:
-                vectors = client.embed(
-                    [c.embed_input for c in todo], desc=f"第 {stats['flushed'] + 1} 批"
-                )
-                api_texts += len(todo)
-                rows = [to_row(c, v) for c, v in zip(todo, vectors)]
-                stats["inserted"] += store.insert(rows)
-            stats["flushed"] += 1
-            batch.clear()
+        # 阶段二：批量向量化 + upsert（钱花在这里）
+        for start in range(0, len(pending), BATCH_CHUNKS):
+            batch = pending[start : start + BATCH_CHUNKS]
+            vectors = client.embed(
+                [c.embed_input for c in batch], desc=f"第 {start // BATCH_CHUNKS + 1} 批"
+            )
+            api_texts += len(batch)
+            rows = [to_row(c, v) for c, v in zip(batch, vectors)]
+            stats["upserted"] += store.upsert(rows)
 
-        for chunk in chunks:
-            batch.append(chunk)
-            if len(batch) >= BATCH_CHUNKS:
-                flush()
-        flush()
+        # 阶段三：清理影子块 / 孤儿行
+        if stale:
+            stats["deleted"] += store.delete_pks(stale)
 
         print(f"库内条数     : {store.count()}")
-        print(f"本次插入     : {stats['inserted']}")
-        print(f"已存在跳过   : {stats['skipped']}")
+        print(f"新增         : {stats['new']}")
+        print(f"更新（覆盖） : {stats['updated']}")
+        print(f"删除（孤儿） : {stats['deleted']}")
+        print(f"跳过（未变） : {stats['skipped']}")
         print(f"embedding 条数: {api_texts}")
     return 0
 
