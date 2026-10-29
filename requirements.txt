@@ -70,3 +70,4 @@ websockets==16.1.1
 wrapt==2.5.0
 xxhash==4.0.1
 zstandard==0.25.0
+rank-bm25==0.2.2

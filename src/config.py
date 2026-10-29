@@ -29,6 +29,11 @@ RAW_DIR = DATA_DIR / "raw"              # esearch / efetch 下来的原始 XML
 PROCESSED_DIR = DATA_DIR / "processed"  # 解析分块后的 jsonl
 LOG_DIR = PROJECT_ROOT / "log"
 
+# 评测集与评测结果（第 4 周）。数据集是手写资产，**不许**被代码覆盖。
+EVAL_DIR = DATA_DIR / "eval"
+EVAL_DATASET = EVAL_DIR / "dataset.jsonl"
+EVAL_RESULTS_DIR = EVAL_DIR / "results"
+
 # 显式指定 .env 路径，不依赖"当前工作目录恰好是项目根"
 # ⚠️ 必须在下面读 `MILVUS_URI` 之前加载，否则 .env 里的值读不到
 dotenv.load_dotenv(PROJECT_ROOT / ".env", override=False)
@@ -138,7 +143,7 @@ def get_embedding_config() -> EmbeddingConfig:
 
 def ensure_dirs() -> None:
     """建好所有输出目录。离线建库前调一次即可，幂等。"""
-    for d in (DATA_DIR, RAW_DIR, PROCESSED_DIR, LOG_DIR):
+    for d in (DATA_DIR, RAW_DIR, PROCESSED_DIR, LOG_DIR, EVAL_DIR, EVAL_RESULTS_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 
