@@ -42,7 +42,7 @@ def rrf_fuse(ranked_lists: list[list[str]], k: int = RRF_K) -> list[tuple[str, f
                 scores[doc_id] = 0.0
             scores[doc_id] += current_score
             rank += 1
-    
+
     result_list = list(scores.items())
     def sort_rule(item):
         doc_id = item[0]
@@ -149,3 +149,6 @@ def hybrid_retrieve(
     finally:
         if own_store:
             store.close()
+
+def describe(top_k: int = DEFAULT_TOP_K, n_each: int = DEFAULT_N_EACH) -> str:
+    return f"hybrid(bm25+vector, rrf_k={RRF_K}, n_each={n_each}, top_k={top_k})"

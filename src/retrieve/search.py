@@ -80,3 +80,7 @@ def retrieve(
     finally:
         if own_store:
             store.close()
+            
+def describe(top_k: int = DEFAULT_TOP_K) -> str:
+    """这一路检索的身份 —— 版本块里的 retriever 只能从这里取。"""
+    return f"vector(top_k={top_k})"

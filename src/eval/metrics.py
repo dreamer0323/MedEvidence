@@ -4,7 +4,7 @@
 
   · **命中** = Top-K 里存在某条 Hit，`pmc_id` 在 `gold_pmc_ids` 里，
     **并且** `section` 精确等于 `gold_sections` 中的某一项
-  · **Recall@K** = Top-K 内命中的题数 / 总题数（分母含负例）
+  · **Recall@K** = Top-K 内命中的题数 / **有答案的题数**（has_answer=true；负例不进分母）
   · **MRR** = 只在 `rank` 存在的题上算 `1/rank`，再平均（没命中的题不进分母）
   · `section` 是**末级标题**（"Abstract" / "Survival analysis"），不是完整 `path`
 """

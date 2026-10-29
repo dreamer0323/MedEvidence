@@ -18,7 +18,7 @@ from src.eval.metrics import EvalRecord, first_hit_rank, summarize
 from src.eval.validate import validate_dataset
 from src.generate.client import generate
 from src.generate.prompt import count_sentences, is_refusal, unsupported_sentences
-from src.retrieve import retrieve
+from src.retrieve import retrieve, describe
 
 # 检索 10 条：Recall@5 只看前 5，MRR 需要看到第 6-10 名
 TOP_K = 10
@@ -133,7 +133,7 @@ def main() -> int:
         "corpus_chunks": manifest.get("n_chunks"),
         "git_commit": git_commit(),
         "llm_model": details[-1]["model"] if details else "",
-        "retriever": f"vector(top_k={TOP_K})",
+        "retriever": describe(TOP_K),
     }
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
