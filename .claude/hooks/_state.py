@@ -31,8 +31,12 @@ MAX_STOP_BLOCKS = 2        # 每回合最多阻断收尾几次
 
 MODE_VALUES = ("on", "guard-only", "teach-only", "off")
 
+# 落点文件名：新项目用无编号名，旧项目（MedEvidence 等）用编号名。
+# 解析顺序见 doc_paths()：先找旧名，再找新名，都存在时用旧名。
 DOC_09 = "09-决策记录.md"
 DOC_04 = "04-怀疑清单.md"
+ALT_09 = "决策记录.md"
+ALT_04 = "怀疑清单.md"
 
 
 # ---------------------------------------------------------------- 时间
@@ -133,10 +137,27 @@ def project_root() -> str:
     return os.path.dirname(os.path.dirname(HERE))
 
 
+def _pick_doc(base: str, primary: str, alt: str) -> str:
+    """在 base 下按优先级挑一个真实存在的落点文件；都不存在时返回 primary。
+
+    返回 primary 是刻意保留的原行为：文件不存在 -> 上层跳过落盘要求，不报错。
+    """
+    p = os.path.join(base, primary)
+    if os.path.exists(p):
+        return p
+    a = os.path.join(base, alt)
+    if os.path.exists(a):
+        return a
+    return p
+
+
 def doc_paths(root: str = None):
-    """09 / 04 两个落点文件的绝对路径（在项目根的上一级，即 plan/ 下）。"""
+    """决策记录 / 怀疑清单 两个落点的绝对路径（项目根的上一级）。
+
+    兼容两种命名：09-决策记录.md / 决策记录.md（旧项目 / 新项目）。
+    """
     base = os.path.dirname(os.path.abspath((root or project_root()).rstrip("/\\")))
-    return [os.path.join(base, DOC_09), os.path.join(base, DOC_04)]
+    return [_pick_doc(base, DOC_09, ALT_09), _pick_doc(base, DOC_04, ALT_04)]
 
 
 # ---------------------------------------------------------------- 读写
@@ -291,7 +312,7 @@ def release_ready(rnd: dict, data: dict, root: str = None):
         base = rnd.get("baseline") or {}
         changed = [p for p in doc_paths(root) if file_hash(p) != base.get(p, "")]
         if not changed:
-            missing.append("09-决策记录.md / 04-怀疑清单.md 里还没有本回合的新增记录")
+            missing.append("决策记录 / 怀疑清单 里还没有本回合的新增记录")
 
     if require_user_turn():
         if (data.get("user_turn_count") or 0) <= (rnd.get("turns_at_open") or 0):

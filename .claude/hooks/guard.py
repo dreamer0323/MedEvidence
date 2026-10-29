@@ -297,7 +297,7 @@ def emit_block(reason: str, missing=None, root: str = None) -> None:
         "  1. 你打算怎么做？为什么这么选？代价是什么？\n"
         "  2. 你打算怎么验证它？（说清指标和实验设计 —— 说方法，不是结果）\n\n")
     r = state.routing(root) if state else (
-        "落点：项目同级的 09-决策记录.md / 04-怀疑清单.md（若不存在则跳过落盘）\n\n")
+        "落点：项目同级的 决策记录.md / 怀疑清单.md（旧项目为 09-/04- 前缀；都不存在则跳过落盘）\n\n")
     extra = ""
     if missing:
         extra = ("还差这些条件才会自动放行：\n"

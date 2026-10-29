@@ -86,21 +86,39 @@ def check(name, cond, extra=""):
         fails.append(name)
 
 
+def _first_protected(proj):
+    """取沙箱里 protected-paths.txt 的第一个受保护目录（相对项目根）。
+
+    不能写死 src/eval —— 清单是按项目定的，写死会让换项目后测试全红。
+    """
+    p = os.path.join(proj, ".claude", "hooks", "protected-paths.txt")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            for line in fh:
+                s = line.strip()
+                if s and not s.startswith("#"):
+                    return s.rstrip("/")
+    except OSError:
+        pass
+    return "%s/eval" % SRC            # 兜底：模板原始清单的第一项
+
+
 def build_sandbox():
     tmp = tempfile.mkdtemp(prefix="rounds-")
     plan = os.path.join(tmp, "plan")
     proj = os.path.join(plan, "Proj")
     hooks = os.path.join(proj, ".claude", "hooks")
     os.makedirs(hooks)
-    os.makedirs(os.path.join(proj, SRC, "eval"))
     for f in HOOK_FILES:
         s = os.path.join(HERE, f)
         if os.path.exists(s):
             shutil.copy2(s, os.path.join(hooks, f))
+    first = _first_protected(proj)
+    os.makedirs(os.path.join(proj, first))
     for name in (DOC_09, DOC_04):
         with open(os.path.join(plan, name), "w", encoding="utf-8") as fh:
             fh.write("# %s\n\n初始内容\n" % name)
-    return tmp, plan, proj, hooks
+    return tmp, plan, proj, hooks, first
 
 
 def env_for(proj):
@@ -171,8 +189,8 @@ def clear_mode(proj):
 
 
 def main():
-    tmp, plan, proj, hooks = build_sandbox()
-    target = "%s/eval/chunk.py" % SRC
+    tmp, plan, proj, hooks, first = build_sandbox()
+    target = first + "/chunk.py"
 
     try:
         # 1. 首次写受保护目录 → 拦，且开回合、带前瞻两问

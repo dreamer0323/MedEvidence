@@ -15,6 +15,11 @@ env/
 #    语料清单 data/corpus.json 必须进 git：它是"评测可复现"的凭证（语料快照）。
 data/*
 !data/corpus.json
+# 评测集是手写资产、manifest 是数据状态凭证 —— 两者必须进 git，否则换机器就没了
+!data/eval/
+data/eval/*
+!data/eval/dataset.jsonl
+!data/manifest.json
 *.sqlite3
 chroma/
 
